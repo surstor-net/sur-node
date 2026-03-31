@@ -1,0 +1,531 @@
+openapi: 3.1.0
+info:
+  title: SurStor API
+  description: |
+    SurStor gives AI agents persistent, content-addressed memory with provenance.
+
+    All artifacts are identified by a `sha256:` hash — same content always produces
+    the same hash, on any machine, in any session. Pass a hash to any AI agent and
+    it can retrieve exactly what was stored.
+
+    **Authentication:** Include your API key on every request (except `/health`):
+    ```
+    X-SurStor-Key: ssk_local_yourkey
+    ```
+
+    **SurStor Personal:** Set `SURSTOR_API_KEY` env var and run `node sur-rest.js`.
+    **SurStor Grid:** Also set `COVIA_URL` to replicate provenance across venues.
+  version: 0.3.0
+  contact:
+    name: SurStor
+    url: https://surstor.net
+
+servers:
+  - url: https://api.surstor.com/api/v1
+    description: SurStor (api.surstor.com)
+
+security:
+  - ApiKeyHeader: []
+
+components:
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-SurStor-Key
+
+  schemas:
+    Artifact:
+      type: object
+      properties:
+        hash:
+          type: string
+          description: "Content-addressed SHA-256 hash — the artifact's permanent identity"
+          example: "sha256:310af3ea5085476e9ff37881157a4e8787577526cd20695eeb64300c41b1580e"
+        label:
+          type: string
+          nullable: true
+          description: Human-readable label
+          example: "surstor-architecture-cleanup"
+        tags:
+          type: array
+          items:
+            type: string
+          example: ["session-snapshot", "surstor", "architecture"]
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-03-31T16:51:33.521Z"
+        size:
+          type: integer
+          description: Content size in bytes
+          example: 1152
+
+    ArtifactWithContent:
+      type: object
+      properties:
+        hash:
+          type: string
+        label:
+          type: string
+          nullable: true
+        tags:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        size:
+          type: integer
+        content:
+          type: string
+          description: The full artifact content
+
+    StoreResult:
+      type: object
+      properties:
+        hash:
+          type: string
+          example: "sha256:310af3ea5085476e9ff37881157a4e8787577526cd20695eeb64300c41b1580e"
+        label:
+          type: string
+          nullable: true
+        size:
+          type: integer
+        stored_at:
+          type: string
+          format: date-time
+        deduplicated:
+          type: boolean
+          description: true if this content already existed — hash is the same either way
+
+    LinkRecord:
+      type: object
+      properties:
+        link_hash:
+          type: string
+        from:
+          type: string
+        to:
+          type: array
+          items:
+            type: string
+        rel:
+          type: string
+          example: derived-from
+        created_at:
+          type: string
+          format: date-time
+        note:
+          type: string
+          nullable: true
+
+    LinkEdge:
+      type: object
+      properties:
+        link_hash:
+          type: string
+        to:
+          type: string
+        from:
+          type: string
+        rel:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    TreeNode:
+      type: object
+      description: A node in the provenance tree. Children are nested TreeNode objects.
+      properties:
+        hash:
+          type: string
+        label:
+          type: string
+          nullable: true
+        depth:
+          type: integer
+        rel:
+          type: string
+          nullable: true
+        children:
+          type: array
+          items:
+            type: object
+            description: Nested provenance node (same structure as TreeNode)
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "Artifact not found"
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadRequest:
+      description: Missing or invalid request body
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Artifact not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+paths:
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      description: Returns server status. No authentication required.
+      security: []
+      tags: [System]
+      responses:
+        '200':
+          description: Server is running
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  version:
+                    type: string
+                    example: "0.3.0"
+                  dlfs:
+                    type: string
+                    example: "http://127.0.0.1:8765"
+                  covia:
+                    type: string
+                    enum: [enabled, disabled]
+
+  /artifacts:
+    get:
+      operationId: listArtifacts
+      summary: List artifacts
+      description: Returns artifacts from the local index, newest first.
+      tags: [Artifacts]
+      parameters:
+        - name: tag
+          in: query
+          description: Filter by tag
+          schema:
+            type: string
+          example: session-snapshot
+        - name: limit
+          in: query
+          description: Maximum results to return (default 20)
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: List of artifacts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Artifact'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: storeArtifact
+      summary: Store an artifact
+      description: |
+        Stores content in DLFS with an optional label and tags. Returns the
+        content-addressed hash. Identical content always returns the same hash
+        (deduplicated = true if it already existed).
+      tags: [Artifacts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  description: The content to store (any text, JSON, markdown, etc.)
+                label:
+                  type: string
+                  description: Human-readable label
+                tags:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '201':
+          description: Artifact stored (new)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StoreResult'
+        '200':
+          description: Artifact already existed (deduplicated)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StoreResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /artifacts/{hash}:
+    get:
+      operationId: getArtifact
+      summary: Retrieve an artifact
+      description: Returns the artifact metadata and full content by its hash.
+      tags: [Artifacts]
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          description: "The sha256: hash"
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Artifact found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactWithContent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /snapshots:
+    post:
+      operationId: saveSnapshot
+      summary: Save a session snapshot
+      description: |
+        Stores a structured session snapshot — a summary of what happened in a
+        conversation or work session. Returns a hash you can share with any AI
+        agent to resume context.
+      tags: [Snapshots]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label, summary]
+              properties:
+                label:
+                  type: string
+                  description: Short session label
+                summary:
+                  type: string
+                  description: Full session summary — topics, decisions, artifacts, next steps
+                tags:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '201':
+          description: Snapshot stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StoreResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /links:
+    post:
+      operationId: createLink
+      summary: Create a provenance link
+      description: |
+        Records a relationship between artifacts. Links are immutable once created.
+
+        Relationship types: derived-from (default), references, supersedes, corrects, responds-to
+      tags: [Provenance]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to]
+              properties:
+                from:
+                  type: string
+                  description: Hash of the artifact doing the linking
+                to:
+                  type: array
+                  items:
+                    type: string
+                  description: Array of hashes being linked to
+                rel:
+                  type: string
+                  default: derived-from
+                note:
+                  type: string
+                  description: Optional human note about why this link exists
+      responses:
+        '201':
+          description: Link created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /links/{hash}:
+    get:
+      operationId: queryLinks
+      summary: Query links for an artifact
+      description: Returns what an artifact points to (out), what points to it (in), or both.
+      tags: [Provenance]
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: dir
+          in: query
+          description: "Direction: out (default), in, or both"
+          schema:
+            type: string
+            enum: [out, in, both]
+            default: out
+        - name: rel
+          in: query
+          description: Filter by relationship type
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Links for the artifact
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hash:
+                    type: string
+                  out:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LinkEdge'
+                  in:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LinkEdge'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /tree/{hash}:
+    get:
+      operationId: walkTree
+      summary: Walk the provenance tree
+      description: |
+        Traverses the full DAG of ancestors or descendants from a given artifact.
+        Use dir=up to find everything that fed into an artifact.
+        Use dir=down to find everything derived from it.
+      tags: [Provenance]
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: dir
+          in: query
+          description: "Direction: up = ancestors (default), down = descendants"
+          schema:
+            type: string
+            enum: [up, down]
+            default: up
+        - name: depth
+          in: query
+          description: Maximum hops to traverse (default 10)
+          schema:
+            type: integer
+            default: 10
+      responses:
+        '200':
+          description: Provenance tree
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  root:
+                    type: string
+                  dir:
+                    type: string
+                  tree:
+                    $ref: '#/components/schemas/TreeNode'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /admin/rebuild:
+    post:
+      operationId: rebuildIndex
+      summary: Rebuild the SQLite index
+      description: Rebuilds the local SQLite query cache from DLFS. Use sparingly — hits every artifact in storage.
+      tags: [Admin]
+      responses:
+        '200':
+          description: Rebuild complete
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rebuilt:
+                    type: integer
+                  source:
+                    type: string
+                  covia:
+                    type: string
+                  message:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+tags:
+  - name: System
+    description: Health and status
+  - name: Artifacts
+    description: Store and retrieve content-addressed artifacts
+  - name: Snapshots
+    description: Save and retrieve session snapshots
+  - name: Provenance
+    description: Create and traverse knowledge provenance links
+  - name: Admin
+    description: Administrative operations (not for public exposure)
