@@ -1,0 +1,8 @@
+node_modules/
+store.db
+dlfs.log
+dlfs-err.log
+
+# Covia API reference — Java source files from github.com/covia-ai/covia
+# Saved for context, not part of the sur-node codebase
+covia-api/

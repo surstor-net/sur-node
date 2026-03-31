@@ -1,0 +1,14 @@
+{
+  "name": "sur-node",
+  "version": "0.3.0",
+  "description": "SurStor MCP server — artifact availability for AI agents",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "better-sqlite3": "^11.0.0"
+  }
+}
