@@ -1,10 +1,13 @@
 // covia-adapter.js — SurStor Grid backend
-// Replicates artifacts to a Covia venue via /api/v1/ HTTP API.
-// Runs alongside DLFS — DLFS remains local source of truth,
-// Covia adds distributed replication via CASLattice (:grid/:meta).
+// Replicates PROVENANCE (sur-link records) to a Covia venue via /api/v1/ HTTP API.
+// Artifacts stay in DLFS. Covia stores provenance, not content.
+//
+// Architecture:
+//   DLFS  — artifact content + metadata (always, local source of truth)
+//   Covia — sur-link provenance records → :grid/:meta CASLattice (Grid mode only)
 //
 // SurStor Personal: COVIA_URL not set → DLFS only
-// SurStor Grid:     COVIA_URL set     → DLFS + Covia venue replication
+// SurStor Grid:     COVIA_URL set     → DLFS artifacts + Covia provenance
 //
 // Env vars:
 //   COVIA_URL    e.g. http://hostname:port   (required to enable Grid mode)

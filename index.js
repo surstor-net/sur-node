@@ -105,7 +105,8 @@ async function dlfsGetMeta(hash) {
   return JSON.parse(r.body);
 }
 
-// Core store — writes to DLFS (local source of truth) + Covia (distributed, if enabled) then SQLite (cache)
+// Core store — writes artifact to DLFS (source of truth) then SQLite (cache)
+// Artifacts stay local. Only provenance (sur-link records) goes to Covia.
 async function store(content, label, tags) {
   const hash = contentHash(content);
   const now = Date.now();
@@ -118,13 +119,6 @@ async function store(content, label, tags) {
     await dlfsPutMeta(hash, meta);
     db.prepare('INSERT INTO artifacts (hash, label, tags, created_at, size) VALUES (?, ?, ?, ?, ?)')
       .run(hash, meta.label, JSON.stringify(tags), now, size);
-
-    // Replicate to Covia venue if configured — fire-and-forget, DLFS remains source of truth
-    if (coviaEnabled()) {
-      coviaStoreAsset(content).catch(err =>
-        process.stderr.write(`[covia] store failed for ${hash}: ${err.message}\n`)
-      );
-    }
   }
 
   return {
@@ -154,22 +148,25 @@ async function rebuild() {
     count++;
   }
 
-  // If Covia is enabled, also pull any assets not in DLFS (cross-venue artifacts)
+  // If Covia is enabled, also rebuild the links table from Covia provenance records
+  // Artifacts live in DLFS. Covia holds sur-link provenance only.
   if (coviaEnabled()) {
     try {
+      db.prepare('DELETE FROM links').run();
       const hashes = await coviaListAssets();
       for (const coviaHex of hashes) {
         const jsonStr = await coviaGetAsset(coviaHex);
         if (!jsonStr) continue;
         let record;
         try { record = JSON.parse(jsonStr); } catch { continue; }
-        if (!record.hash) continue; // not a sur-node artifact
-        const exists = db.prepare('SELECT 1 FROM artifacts WHERE hash = ?').get(record.hash);
-        if (!exists) {
-          db.prepare('INSERT OR REPLACE INTO artifacts (hash, label, tags, created_at, size) VALUES (?, ?, ?, ?, ?)')
-            .run(record.hash, record.label || null, JSON.stringify(record.tags || []), record.created_at || Date.now(), record.size || 0);
-          count++;
+        if (record.type !== 'sur-link') continue; // only provenance records
+        const targets = Array.isArray(record.to) ? record.to : [record.to];
+        const ts = record.created_at ? new Date(record.created_at).getTime() : Date.now();
+        const stmt = db.prepare('INSERT OR IGNORE INTO links (link_hash, from_hash, to_hash, rel, created_at) VALUES (?, ?, ?, ?, ?)');
+        for (const target of targets) {
+          stmt.run(record.hash || coviaHex, record.from, target, record.rel || 'derived-from', ts);
         }
+        count++;
       }
     } catch (err) {
       process.stderr.write(`[covia] rebuild partial: ${err.message}\n`);
@@ -378,6 +375,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const stmt = db.prepare('INSERT INTO links (link_hash, from_hash, to_hash, rel, created_at) VALUES (?, ?, ?, ?, ?)');
       for (const target of targets) {
         stmt.run(result.hash, from, target, rel, now);
+      }
+
+      // Provenance goes to Covia (Grid mode) — link records belong in :grid/:meta CASLattice
+      // Artifacts stay in DLFS. Covia stores provenance, not content.
+      if (coviaEnabled()) {
+        coviaStoreAsset(record).catch(err =>
+          process.stderr.write(`[covia] sur-link replication failed for ${result.hash}: ${err.message}\n`)
+        );
       }
 
       return { content: [{ type: 'text', text: JSON.stringify({
